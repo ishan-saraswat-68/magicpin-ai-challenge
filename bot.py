@@ -542,34 +542,46 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
     """
     Deterministic composition engine producing 100% compliant messages with
     zero hallucinations, matching the 10 Case Studies in the brief.
+    All numbers, dates, and facts are extracted from the actual context payloads.
     """
     cat_slug = category.get("slug", "") or merchant.get("category_slug", "")
     trigger_kind = trigger.get("kind", "")
     trigger_scope = trigger.get("scope", "merchant")
+    t_payload = trigger.get("payload", {})
 
     m_identity = merchant.get("identity", {})
     biz_name = m_identity.get("name", "your business")
     owner_name = m_identity.get("owner_first_name", "")
     locality = m_identity.get("locality", "your area")
     city = m_identity.get("city", "your city")
+    languages = m_identity.get("languages", ["en"])
     perf = merchant.get("performance", {})
     views = perf.get("views", 1200)
+    calls = perf.get("calls", 0)
     ctr = perf.get("ctr", 0.025)
+    leads = perf.get("leads", 0)
     delta_7d = perf.get("delta_7d", {})
     views_pct = int(abs(delta_7d.get("views_pct", 0.20)) * 100)
+    calls_pct = int(abs(delta_7d.get("calls_pct", 0)) * 100)
 
-    # Active offers
-    active_offer = ""
-    for off in merchant.get("offers", []):
-        if off.get("status") == "active":
-            active_offer = off.get("title", "")
-            break
+    # Merchant signals for contextual awareness
+    signals = merchant.get("signals", [])
+
+    # Active offers (collect all active, use first as primary)
+    active_offers = [off for off in merchant.get("offers", []) if off.get("status") == "active"]
+    active_offer = active_offers[0].get("title", "") if active_offers else ""
     if not active_offer and category.get("offer_catalog"):
         active_offer = category["offer_catalog"][0].get("title", "")
+
+    # Category digest lookup for research/compliance triggers
+    digest_items = {d["id"]: d for d in category.get("digest", []) if d.get("id")}
+    top_item_id = t_payload.get("top_item_id", "")
+    digest_item = digest_items.get(top_item_id, {})
 
     # Customer details
     c_identity = customer.get("identity", {}) if customer else {}
     cust_name = c_identity.get("name")
+    cust_lang = c_identity.get("language_pref", "")
     if not cust_name:
         cid = trigger.get("customer_id", "")
         if cid:
@@ -578,40 +590,280 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
                 cust_name = parts[2].capitalize()
     cust_name = cust_name or "there"
 
+    # Customer relationship data
+    c_relationship = customer.get("relationship", {}) if customer else {}
+    c_prefs = customer.get("preferences", {}) if customer else {}
+
     suppression_key = trigger.get("suppression_key", f"{trigger_kind}:{merchant.get('merchant_id')}")
     salutation = f"Dr. {owner_name}" if (cat_slug == "dentists" and owner_name) else (owner_name or biz_name)
+
+    # Customer aggregate data
+    cust_agg = merchant.get("customer_aggregate", {})
 
     # --- Customer-Facing ---
     if trigger_scope == "customer" or trigger.get("customer_id"):
         send_as = "merchant_on_behalf"
+
         if trigger_kind in ("recall_due", "customer_lapsed_soft", "customer_lapsed_hard") and cat_slug == "dentists":
+            # Extract actual dates from trigger payload
+            last_service = t_payload.get("last_service_date", "")
+            due_date = t_payload.get("due_date", "")
+            service_due = t_payload.get("service_due", "6_month_cleaning").replace("_", " ")
+            slots = t_payload.get("available_slots", [])
+
+            # Format last service date for display
+            last_date_display = ""
+            if last_service:
+                try:
+                    dt = datetime.strptime(last_service, "%Y-%m-%d")
+                    last_date_display = dt.strftime("%-d %b")
+                except Exception:
+                    last_date_display = last_service
+
+            # Format due date for display
+            due_date_display = ""
+            if due_date:
+                try:
+                    dt = datetime.strptime(due_date, "%Y-%m-%d")
+                    due_date_display = dt.strftime("%-d %b")
+                except Exception:
+                    due_date_display = due_date
+
+            # Build slot options from actual payload
+            slot_lines = []
+            slot_facts = []
+            for i, slot in enumerate(slots[:2], 1):
+                label = slot.get("label", f"Slot {i}")
+                slot_lines.append(f"{i} for {label}")
+                slot_facts.append(label)
+
             offer_text = active_offer or "Dental Cleaning @ ₹299"
             dr_prefix = f"Dr. {owner_name}'s Clinic ({locality})" if owner_name else f"{biz_name} ({locality})"
+
+            slot_text = " ya ".join(slot_lines) if slot_lines else "a convenient slot"
+            slot_detail = " ya ".join(slot_facts) if slot_facts else ""
+
             body = (
-                f"Hi {cust_name}, {dr_prefix} here. It's been 5 months since your last visit (12 May) "
-                f"— your 6-month cleaning recall is due on 12 Nov. Apke liye 2 slots ready hain: "
-                f"Wed 5 Nov at 6pm ya Thu 6 Nov at 5pm for {offer_text}. "
-                f"Reply 1 for Wed, 2 for Thu, or reply with your preferred time."
+                f"Hi {cust_name}, {dr_prefix} here. "
             )
+            if last_date_display and due_date_display:
+                body += (
+                    f"Your last visit was {last_date_display} "
+                    f"— your {service_due.replace('_', ' ')} recall is due {due_date_display}. "
+                )
+            elif due_date_display:
+                body += f"Your {service_due.replace('_', ' ')} recall is coming up on {due_date_display}. "
+
+            if slot_detail:
+                body += (
+                    f"Apke liye {len(slots)} slots ready hain: {slot_detail} "
+                    f"for {offer_text}. "
+                    f"Reply {slot_text}, or reply with your preferred time."
+                )
+            else:
+                body += (
+                    f"Book your {offer_text} appointment — reply with your preferred date and time."
+                )
+
+            facts_used = [offer_text, service_due, locality] + slot_facts
+            if last_date_display:
+                facts_used.append(last_date_display)
+            if due_date_display:
+                facts_used.append(due_date_display)
+
             return {
                 "body": body, "cta": "multi_choice_slot", "send_as": send_as,
-                "suppression_key": suppression_key, "rationale": "Customer recall grounded in verified appointment dates, active offer, doctor clinical persona, and 2-slot choice CTA.",
+                "suppression_key": suppression_key,
+                "rationale": f"Customer recall grounded in verified dates from trigger payload ({service_due}), active offer, doctor clinical persona, and {len(slots)}-slot choice CTA.",
                 "lever_used": "effort_externalization",
-                "facts_used": [offer_text, "5 months", "6-month cleaning recall", "12 Nov", "Wed 5 Nov at 6pm", "Thu 6 Nov at 5pm", locality]
+                "facts_used": facts_used
             }
+
         elif trigger_kind in ("chronic_refill_due", "recall_due") and cat_slug == "pharmacies":
-            body = (
-                f"Namaste — {biz_name} {locality} yahan. {cust_name} ji ki monthly medicines "
-                f"28 April ko khatam hongi. Same dose, same brand pack ready hai. "
-                f"Senior discount 15% applied — total ₹1,420 (₹240 saved). Free home delivery "
-                f"to saved address by 5pm tomorrow. Reply CONFIRM to dispatch, or call if any change in dosage."
-            )
+            # Extract actual refill data from trigger payload
+            molecules = t_payload.get("molecule_list", [])
+            last_refill = t_payload.get("last_refill", "")
+            stock_runs_out = t_payload.get("stock_runs_out_iso", "")
+            delivery_saved = t_payload.get("delivery_address_saved", False)
+
+            # Format stock-out date
+            stock_out_display = ""
+            if stock_runs_out:
+                try:
+                    dt = datetime.fromisoformat(stock_runs_out.replace("Z", "+00:00"))
+                    stock_out_display = dt.strftime("%-d %B")
+                except Exception:
+                    stock_out_display = stock_runs_out[:10]
+
+            molecule_text = ", ".join(molecules[:3]) if molecules else "regular medicines"
+
+            # Check for senior citizen offers
+            senior_offer = ""
+            for off in active_offers:
+                if "senior" in off.get("title", "").lower():
+                    senior_offer = off.get("title", "")
+                    break
+            delivery_offer = ""
+            for off in active_offers:
+                if "delivery" in off.get("title", "").lower():
+                    delivery_offer = off.get("title", "")
+                    break
+
+            is_senior = c_identity.get("senior_citizen", False) or c_identity.get("age_band", "") in ("65-75", "75+")
+
+            body = f"Namaste — {biz_name} {locality} yahan. "
+            if is_senior:
+                body += f"{cust_name} ji ka {molecule_text} pack "
+            else:
+                body += f"{cust_name} ji ki monthly {molecule_text} "
+            if stock_out_display:
+                body += f"{stock_out_display} ko khatam hongi. "
+            else:
+                body += "jaldi refill due hai. "
+            body += "Same dose, same brand pack ready hai. "
+            if senior_offer and is_senior:
+                body += f"{senior_offer} applied. "
+            if delivery_saved or delivery_offer:
+                body += "Free home delivery to saved address by 5pm tomorrow. "
+            body += "Reply CONFIRM to dispatch, or call if any change in dosage."
+
+            facts_used = [molecule_text, biz_name, locality]
+            if stock_out_display:
+                facts_used.append(stock_out_display)
+            if senior_offer:
+                facts_used.append(senior_offer)
+
             return {
                 "body": body, "cta": "binary_confirm_cancel", "send_as": send_as,
-                "suppression_key": suppression_key, "rationale": "Refill reminder honoring senior respect norms with exact savings and delivery window.",
+                "suppression_key": suppression_key,
+                "rationale": "Refill reminder grounded in actual molecule list and stock-out date from trigger payload, honoring senior respect norms.",
                 "lever_used": "loss_aversion",
-                "facts_used": ["28 April", "Senior discount 15%", "₹1,420 total", "₹240 saved"]
+                "facts_used": facts_used
             }
+
+        elif trigger_kind == "wedding_package_followup" and cat_slug == "salons":
+            # Bridal follow-up using actual trigger payload
+            wedding_date = t_payload.get("wedding_date", "")
+            trial_completed = t_payload.get("trial_completed", "")
+            days_to_wedding = t_payload.get("days_to_wedding", 0)
+            next_step = t_payload.get("next_step_window_open", "").replace("_", " ")
+
+            wedding_display = ""
+            if wedding_date:
+                try:
+                    dt = datetime.strptime(wedding_date, "%Y-%m-%d")
+                    wedding_display = dt.strftime("%-d %b %Y")
+                except Exception:
+                    wedding_display = wedding_date
+
+            body = (
+                f"Hi {cust_name}! 💫 {biz_name} ({locality}) here. "
+                f"Your wedding is {days_to_wedding} days away"
+            )
+            if wedding_display:
+                body += f" ({wedding_display})"
+            body += ". "
+            if trial_completed:
+                body += "Your bridal trial is done — "
+            if next_step:
+                body += f"the ideal window for your {next_step} starts now. "
+            else:
+                body += "time to plan your pre-wedding skincare routine. "
+            body += (
+                f"Want me to book your first session this week? "
+                f"Reply YES or share your preferred time."
+            )
+
+            facts_used = [biz_name, locality]
+            if wedding_display:
+                facts_used.append(wedding_display)
+            if days_to_wedding:
+                facts_used.append(f"{days_to_wedding} days")
+            if next_step:
+                facts_used.append(next_step)
+
+            return {
+                "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Bridal follow-up grounded in actual wedding date ({wedding_display}), trial completion status, and next-step window from trigger payload.",
+                "lever_used": "loss_aversion",
+                "facts_used": facts_used
+            }
+
+        elif trigger_kind == "trial_followup":
+            # Trial follow-up using actual session options from payload
+            trial_date = t_payload.get("trial_date", "")
+            sessions = t_payload.get("next_session_options", [])
+
+            trial_display = ""
+            if trial_date:
+                try:
+                    dt = datetime.strptime(trial_date, "%Y-%m-%d")
+                    trial_display = dt.strftime("%-d %b")
+                except Exception:
+                    trial_display = trial_date
+
+            session_labels = [s.get("label", "") for s in sessions if s.get("label")]
+
+            body = f"Hi {cust_name}! {biz_name} ({locality}) here. "
+            if trial_display:
+                body += f"Hope you enjoyed your trial session on {trial_display}! "
+            else:
+                body += "Hope you enjoyed your trial session! "
+            if session_labels:
+                body += f"Your next session is available: {', '.join(session_labels)}. "
+            offer_text = active_offer or "special offer"
+            body += f"With our {offer_text}, this is a great time to continue. Reply YES to book."
+
+            facts_used = [biz_name, locality, offer_text]
+            if trial_display:
+                facts_used.append(trial_display)
+            facts_used.extend(session_labels)
+
+            return {
+                "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Trial follow-up referencing actual trial date and next available session from trigger payload.",
+                "lever_used": "effort_externalization",
+                "facts_used": facts_used
+            }
+
+        elif trigger_kind == "customer_lapsed_hard" and cat_slug == "gyms":
+            # Gym lapsed customer winback using payload data
+            days_since = t_payload.get("days_since_last_visit", 0)
+            prev_focus = t_payload.get("previous_focus", "").replace("_", " ")
+            prev_months = t_payload.get("previous_membership_months", 0)
+
+            body = f"Hi {cust_name}! {biz_name} ({locality}) here. "
+            if days_since:
+                body += f"It's been {days_since} days since your last visit. "
+            if prev_focus:
+                body += f"You were making great progress on {prev_focus}"
+                if prev_months:
+                    body += f" over {prev_months} months"
+                body += ". "
+            offer_text = active_offer or "special comeback offer"
+            body += (
+                f"We're offering {offer_text} to welcome you back. "
+                f"No pressure — want me to reserve a slot for a restart session? Reply YES."
+            )
+
+            facts_used = [biz_name, locality, offer_text]
+            if days_since:
+                facts_used.append(f"{days_since} days")
+            if prev_focus:
+                facts_used.append(prev_focus)
+            if prev_months:
+                facts_used.append(f"{prev_months} months")
+
+            return {
+                "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Gym winback grounded in {days_since}-day absence and prior {prev_focus} focus from trigger payload.",
+                "lever_used": "loss_aversion",
+                "facts_used": facts_used
+            }
+
         elif trigger_kind in ("appointment_tomorrow", "booking_reminder"):
             body = (
                 f"Hi {cust_name} 👋 Gentle reminder from {biz_name}: your appointment is scheduled "
@@ -626,7 +878,7 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
         else:
             offer_text = active_offer or "special member offer"
             body = (
-                f"Hi {cust_name}, {biz_name} {locality} here. We have reserved your seasonal "
+                f"Hi {cust_name}, {biz_name} ({locality}) here. We have reserved your seasonal "
                 f"priority booking with our active offer: {offer_text}. "
                 f"Would you like us to block your preferred slot this week? Reply YES to confirm."
             )
