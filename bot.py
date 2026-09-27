@@ -1714,6 +1714,44 @@ class ReplyPayload(BaseModel):
     turn_number: int = 1
 
 
+# --- Root Endpoint (/) ---
+@app.get("/")
+async def root():
+    return {
+        "service": "magicpin Vera AI Assistant",
+        "version": "1.0.0",
+        "description": "Next-generation WhatsApp merchant engagement assistant for the magicpin AI Challenge.",
+        "endpoints": [
+            {
+                "method": "GET",
+                "paths": ["/v1/healthz", "/health", "/healthz"],
+                "description": "Health check – returns service status, uptime, and loaded context counts."
+            },
+            {
+                "method": "GET",
+                "paths": ["/v1/metadata", "/metadata"],
+                "description": "Team & model metadata – returns team name, approach, model info, and version."
+            },
+            {
+                "method": "POST",
+                "paths": ["/v1/context", "/context"],
+                "description": "Context ingestion – push merchant, category, trigger, or customer context data."
+            },
+            {
+                "method": "POST",
+                "paths": ["/v1/tick", "/tick"],
+                "description": "Tick / proactive outreach – given available triggers, compose and return outbound message actions."
+            },
+            {
+                "method": "POST",
+                "paths": ["/v1/reply", "/reply"],
+                "description": "Reply handling – process an inbound merchant reply and return the bot's next action."
+            }
+        ],
+        "docs_url": "/docs"
+    }
+
+
 # --- Health Endpoints (/v1/healthz, /health, /healthz) ---
 @app.get("/v1/healthz")
 @app.get("/health")
