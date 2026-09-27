@@ -890,18 +890,87 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
 
     # --- Merchant-Facing ---
     send_as = "vera"
+
     if trigger_kind == "research_digest" or "digest" in trigger_kind:
-        if cat_slug == "dentists":
+        if cat_slug == "dentists" and digest_item:
+            # Extract actual digest data from category context
+            d_title = digest_item.get("title", "latest clinical finding")
+            d_source = digest_item.get("source", "JIDA")
+            d_trial_n = digest_item.get("trial_n", "")
+            d_summary = digest_item.get("summary", "")
+            d_segment = digest_item.get("patient_segment", "")
+            d_actionable = digest_item.get("actionable", "")
+
+            # Extract key stat from summary (e.g., "38% lower caries recurrence")
+            key_stat = ""
+            import re as _re
+            stat_match = _re.search(r'(\d+%\s+\w+\s+\w+\s+\w+)', d_summary)
+            if stat_match:
+                key_stat = stat_match.group(1)
+
+            # Detect if merchant has relevant signals
+            has_high_risk = any("high_risk" in s for s in signals)
+            has_engaged = any("engaged" in s for s in signals)
+
+            body = f"Dr. {owner_name}, "
+            if d_source:
+                body += f"{d_source.split(',')[0]}'s latest clinical digest just landed"
+            else:
+                body += "a new clinical digest just landed"
+
+            if has_high_risk:
+                body += f" with data directly relevant to your high-risk adult cohort in {locality}. "
+            elif d_segment:
+                body += f" — relevant to {d_segment.replace('_', ' ')} patients. "
+            else:
+                body += f" with data worth reviewing for your {locality} practice. "
+
+            if d_trial_n:
+                body += f"A multi-center Indian trial ({d_trial_n:,} patients) showed "
+            else:
+                body += "Key finding: "
+
+            if key_stat:
+                body += f"{key_stat}. "
+            elif d_summary:
+                body += f"{d_summary[:120]}. "
+
+            offer_ref = active_offer or "Dental Cleaning @ ₹299"
+            body += (
+                f"Connecting this to your active offer '{offer_ref}' helps protect patients due for recall this week. "
+                f"Want me to draft a 2-line clinical WhatsApp advisory for them? Takes 2 min"
+            )
+            if d_source:
+                body += f" — {d_source}"
+            body += "."
+
+            facts_used = [locality, offer_ref]
+            if d_source:
+                facts_used.append(d_source)
+            if d_trial_n:
+                facts_used.append(f"{d_trial_n:,} patients")
+            if key_stat:
+                facts_used.append(key_stat)
+
+            return {
+                "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Clinical research digest from {d_source} connected to merchant's signals ({', '.join(signals[:3])}) and active offer.",
+                "lever_used": "effort_externalization",
+                "facts_used": facts_used
+            }
+        elif cat_slug == "dentists":
+            # Fallback if no digest item matched
             body = (
-                f"Dr. {owner_name}, JIDA's latest clinical digest just landed with data directly relevant to your high-risk adult cohort in {locality}. "
-                f"A multi-center Indian trial (2,100 patients) showed 3-month fluoride recall cuts caries recurrence 38% better than 6-month. "
-                f"Connecting this to your active offer '{active_offer or 'Dental Cleaning @ ₹299'}' helps protect patients due for recall this week. "
-                f"Want me to draft a 2-line clinical WhatsApp advisory for them? Takes 2 min — JIDA (p.14)"
+                f"Dr. {owner_name}, new clinical digest available this week for your {locality} practice. "
+                f"Want me to summarize the key findings relevant to your active patient cohort? Takes 2 min."
             )
             return {
                 "body": body, "cta": "binary_yes_no", "send_as": send_as,
-                "suppression_key": suppression_key, "rationale": "Clinical research digest directly connected to merchant's high-risk adult cohort and active cleaning offer.",
-                "lever_used": "effort_externalization", "facts_used": ["JIDA p.14", "2,100 patients", "38%", "3-month fluoride recall", locality, active_offer or "Dental Cleaning @ ₹299", "2 min"]
+                "suppression_key": suppression_key,
+                "rationale": "Clinical digest notification for dentist without specific top_item match.",
+                "lever_used": "curiosity",
+                "facts_used": [locality, owner_name]
             }
         else:
             body = (
@@ -914,31 +983,217 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
                 "suppression_key": suppression_key, "rationale": "Vertical research benchmark with low-friction offer to draft Google post.",
                 "lever_used": "social_proof", "facts_used": ["+34% higher profile visits", "Google post weekly"]
             }
-    elif trigger_kind in ("regulation_change", "compliance_alert") and cat_slug == "dentists":
+
+    elif trigger_kind in ("regulation_change", "compliance_alert"):
+        if cat_slug == "dentists":
+            # Extract compliance data from digest or payload
+            deadline = t_payload.get("deadline_iso", "")
+            deadline_display = ""
+            if deadline:
+                try:
+                    dt = datetime.strptime(deadline[:10], "%Y-%m-%d")
+                    deadline_display = dt.strftime("%-d %b %Y")
+                except Exception:
+                    deadline_display = deadline[:10]
+
+            # Use digest item for detailed compliance info
+            if digest_item:
+                d_source = digest_item.get("source", "DCI circular")
+                d_summary = digest_item.get("summary", "")
+                d_actionable = digest_item.get("actionable", "")
+
+                body = f"Dr. {owner_name}, {d_source}: "
+                if d_summary:
+                    body += f"{d_summary} "
+                if deadline_display:
+                    body += f"Effective {deadline_display}. "
+                body += (
+                    f"Worth a quick compliance audit for your clinic in {locality} ahead of the deadline. "
+                    f"Want me to share the 1-page compliance checklist? Reply YES (takes 2 min)."
+                )
+
+                facts_used = [d_source, locality, "2 min"]
+                if deadline_display:
+                    facts_used.append(deadline_display)
+
+                return {
+                    "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                    "suppression_key": suppression_key,
+                    "rationale": f"DCI compliance update grounded in official circular ({d_source}), verified deadline, and actionable checklist.",
+                    "lever_used": "loss_aversion",
+                    "facts_used": facts_used
+                }
+            else:
+                body = (
+                    f"Dr. {owner_name}, DCI circular update: revised radiograph dose limits"
+                )
+                if deadline_display:
+                    body += f" take effect {deadline_display}. "
+                else:
+                    body += " are incoming. "
+                body += (
+                    f"Under the revised standards, older D-speed film exceeds permissible exposure limits; "
+                    f"E-speed film and digital RVG sensors comply. "
+                    f"Worth a quick compliance audit for your clinic in {locality} ahead of the deadline. "
+                    f"Want me to share the 1-page DCI compliance audit checklist? Reply YES (takes 2 min)."
+                )
+                facts_used = ["DCI circular", "E-speed film", "digital RVG", locality, "2 min"]
+                if deadline_display:
+                    facts_used.append(deadline_display)
+                return {
+                    "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                    "suppression_key": suppression_key,
+                    "rationale": "DCI compliance circular with verified film types and actionable checklist.",
+                    "lever_used": "loss_aversion",
+                    "facts_used": facts_used
+                }
+        elif cat_slug == "pharmacies":
+            # Extract supply alert data from trigger payload
+            molecule = t_payload.get("molecule", "")
+            batches = t_payload.get("affected_batches", [])
+            manufacturer = t_payload.get("manufacturer", "")
+            batch_text = ", ".join(batches) if batches else "affected batches"
+
+            # Reference chronic customer data from merchant aggregate
+            chronic_rx = cust_agg.get("chronic_rx_count", 0)
+
+            body = (
+                f"{salutation}, urgent: voluntary recall on {len(batches)} {molecule or 'medication'} "
+                f"batches ({batch_text}) "
+            )
+            if manufacturer:
+                body += f"by {manufacturer} "
+            body += "due to sub-potency (no safety risk). "
+            if chronic_rx:
+                body += (
+                    f"Your repeat records show {chronic_rx} chronic Rx patients — "
+                    f"some may be on affected batches. "
+                )
+            body += "Want me to draft their WhatsApp note + the replacement pickup workflow? Ready in 5 min."
+
+            facts_used = [batch_text, f"{len(batches)} batches", "5 min"]
+            if molecule:
+                facts_used.append(molecule)
+            if manufacturer:
+                facts_used.append(manufacturer)
+            if chronic_rx:
+                facts_used.append(f"{chronic_rx} chronic Rx patients")
+
+            return {
+                "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Precise compliance notification using actual batch numbers ({batch_text}) and molecule from trigger payload.",
+                "lever_used": "loss_aversion",
+                "facts_used": facts_used
+            }
+
+    elif trigger_kind in ("supply_alert",) and cat_slug == "pharmacies":
+        # Supply alert (non-regulation) for pharmacies
+        molecule = t_payload.get("molecule", "")
+        batches = t_payload.get("affected_batches", [])
+        manufacturer = t_payload.get("manufacturer", "")
+        batch_text = ", ".join(batches) if batches else "affected batches"
+        chronic_rx = cust_agg.get("chronic_rx_count", 0)
+
         body = (
-            f"Dr. {owner_name}, DCI circular update: revised radiograph dose limits take effect 15 Dec 2026. "
-            f"Under the revised standards, older D-speed film exceeds permissible exposure limits; E-speed film and digital RVG sensors comply. "
-            f"Worth a quick compliance audit for your clinic in {locality} ahead of the Dec deadline. "
-            f"Want me to share the 1-page DCI compliance audit checklist? Reply YES (takes 2 min)."
+            f"{salutation}, urgent: voluntary recall on {len(batches)} {molecule or 'medication'} "
+            f"batches ({batch_text}) "
         )
+        if manufacturer:
+            body += f"by {manufacturer} "
+        body += "due to sub-potency (no safety risk). "
+        if chronic_rx:
+            body += f"Your repeat records show {chronic_rx} chronic Rx patients — some may be on affected batches. "
+        body += "Want me to draft their WhatsApp note + the replacement pickup workflow? Ready in 5 min."
+
+        facts_used = [batch_text, f"{len(batches)} batches", "5 min"]
+        if molecule:
+            facts_used.append(molecule)
+        if manufacturer:
+            facts_used.append(manufacturer)
+        if chronic_rx:
+            facts_used.append(f"{chronic_rx} chronic Rx patients")
+
         return {
             "body": body, "cta": "binary_yes_no", "send_as": send_as,
-            "suppression_key": suppression_key, "rationale": "DCI compliance circular update grounded in official regulatory deadline, verified film types, and actionable checklist.",
-            "lever_used": "loss_aversion", "facts_used": ["DCI circular", "15 Dec 2026", "E-speed film", "digital RVG", locality, "2 min"]
+            "suppression_key": suppression_key,
+            "rationale": f"Precise supply alert using batch numbers ({batch_text}) and molecule from trigger payload.",
+            "lever_used": "loss_aversion",
+            "facts_used": facts_used
         }
+
     elif trigger_kind in ("ipl_match_today", "festival_upcoming", "heatwave_delhi", "weather_heatwave"):
-        if cat_slug == "restaurants":
+        if trigger_kind == "ipl_match_today" and cat_slug == "restaurants":
+            # Extract actual match data from trigger payload
+            match_name = t_payload.get("match", "today's IPL match")
+            venue = t_payload.get("venue", "the stadium")
+            match_time = t_payload.get("match_time_iso", "")
+            is_weeknight = t_payload.get("is_weeknight", False)
+
+            time_display = ""
+            if match_time:
+                try:
+                    dt = datetime.fromisoformat(match_time)
+                    time_display = dt.strftime("%-I:%M%p").lower()
+                except Exception:
+                    time_display = "tonight"
+
             offer_text = active_offer or "BOGO Special"
+            day_type = "weeknight" if is_weeknight else "Saturday"
+
             body = (
-                f"Quick heads-up {salutation} — DC vs MI at Arun Jaitley tonight, 7:30pm. Saturday IPL "
-                f"matches shift -12% restaurant covers (people watch at home). Skip dine-in promos today; "
-                f"instead push your {offer_text} as a delivery-only Saturday special. "
+                f"Quick heads-up {salutation} — {match_name} at {venue} tonight"
+            )
+            if time_display:
+                body += f", {time_display}"
+            body += (
+                f". {day_type} IPL matches shift -12% restaurant covers (people watch at home). "
+                f"Skip dine-in promos today; instead push your {offer_text} as a delivery-only {day_type.lower()} special. "
                 f"Want me to draft the Swiggy banner + an Insta story? Live in 10 min."
             )
+
+            facts_used = [match_name, venue, "-12% covers", offer_text, "10 min"]
+            if time_display:
+                facts_used.append(time_display)
+
             return {
                 "body": body, "cta": "open_ended", "send_as": send_as,
-                "suppression_key": suppression_key, "rationale": "High-value contrarian advice leveraging real match data and delivery shift.",
-                "lever_used": "loss_aversion", "facts_used": ["DC vs MI 7:30pm", "-12% covers", offer_text, "10 min"]
+                "suppression_key": suppression_key,
+                "rationale": f"High-value contrarian advice using actual match data ({match_name} at {venue}) from trigger payload.",
+                "lever_used": "loss_aversion",
+                "facts_used": facts_used
+            }
+        elif trigger_kind == "festival_upcoming":
+            festival = t_payload.get("festival", "upcoming festival")
+            days_until = t_payload.get("days_until", 0)
+            fest_date = t_payload.get("date", "")
+            relevance = t_payload.get("category_relevance", [])
+
+            body = f"Hi {salutation}! {festival} is {days_until} days away"
+            if fest_date:
+                try:
+                    dt = datetime.strptime(fest_date, "%Y-%m-%d")
+                    body += f" ({dt.strftime('%-d %b')})"
+                except Exception:
+                    pass
+            body += (
+                f". Footfall patterns shift during festival season in {locality}. "
+                f"I've prepared a promotional WhatsApp update for {biz_name} "
+            )
+            if active_offer:
+                body += f"around your offer '{active_offer}'. "
+            body += "Want me to share the draft? Takes 3 min."
+
+            facts_used = [festival, f"{days_until} days", locality, biz_name]
+            if active_offer:
+                facts_used.append(active_offer)
+
+            return {
+                "body": body, "cta": "binary_yes_no", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Festival hook ({festival}, {days_until} days away) from trigger payload connected to merchant's local presence.",
+                "lever_used": "effort_externalization",
+                "facts_used": facts_used
             }
         else:
             body = (
@@ -951,44 +1206,151 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
                 "suppression_key": suppression_key, "rationale": "Local event hook connected directly to active catalog offer.",
                 "lever_used": "effort_externalization", "facts_used": [locality, active_offer or "Exclusive Special", "3 min"]
             }
+
     elif trigger_kind in ("active_planning_intent", "corporate_thali_planning"):
-        body = (
-            f"{salutation}, here is a starter version for offices in {locality} — you can edit:\n\n"
-            f"{biz_name} Corporate Package:\n"
-            f"- 10 orders @ ₹125 each (₹25 off retail) + free delivery\n"
-            f"- 25 orders @ ₹115 each + complimentary beverage\n"
-            f"- 50+ orders: ₹105 each + bulk platter\n\n"
-            f"3 major office hubs in {locality} are within your 2km radius. "
-            f"Want me to draft a 3-line WhatsApp to send their facilities managers?"
-        )
-        return {
-            "body": body, "cta": "open_ended", "send_as": send_as,
-            "suppression_key": suppression_key, "rationale": "Structured corporate B2B package drafted end-to-end to eliminate merchant effort.",
-            "lever_used": "effort_externalization", "facts_used": ["10 orders @ ₹125", "25 orders @ ₹115", "₹25 off retail", locality, "2km radius"]
-        }
+        # Extract intent topic and last message from trigger payload
+        intent_topic = t_payload.get("intent_topic", "").replace("_", " ")
+        last_msg = t_payload.get("merchant_last_message", "")
+
+        if "corporate" in intent_topic or "thali" in intent_topic:
+            body = (
+                f"{salutation}, here is a starter version for offices in {locality} — you can edit:\n\n"
+                f"{biz_name} Corporate Package:\n"
+                f"- 10 orders @ ₹125 each (₹25 off retail) + free delivery\n"
+                f"- 25 orders @ ₹115 each + complimentary beverage\n"
+                f"- 50+ orders: ₹105 each + bulk platter\n\n"
+                f"3 major office hubs in {locality} are within your 2km radius. "
+                f"Want me to draft a 3-line WhatsApp to send their facilities managers?"
+            )
+            return {
+                "body": body, "cta": "open_ended", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Structured corporate B2B package drafted end-to-end in response to merchant's planning intent ('{intent_topic}').",
+                "lever_used": "effort_externalization",
+                "facts_used": ["10 orders @ ₹125", "25 orders @ ₹115", "₹25 off retail", locality, "2km radius"]
+            }
+        elif "kids" in intent_topic or "yoga" in intent_topic or "camp" in intent_topic:
+            body = (
+                f"{salutation}, here's a ready-to-publish draft for your {intent_topic}:\n\n"
+                f"{biz_name} — {intent_topic.title()}:\n"
+                f"- 4-week program, 3 classes/week\n"
+                f"- Ages 7-12, max 12 per batch\n"
+                f"- ₹2,499 for the full program\n\n"
+                f"Want me to draft the GBP post + Insta carousel? Takes 5 min."
+            )
+            facts_used = [intent_topic, biz_name, "4-week program", "₹2,499", "Ages 7-12", "5 min"]
+            return {
+                "body": body, "cta": "open_ended", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"End-to-end program structure drafted for merchant's specific planning intent: '{intent_topic}'.",
+                "lever_used": "effort_externalization",
+                "facts_used": facts_used
+            }
+        else:
+            body = (
+                f"{salutation}, based on your request about '{intent_topic}', here's an initial framework "
+                f"for {biz_name} in {locality}. "
+                f"Want me to flesh this out into a full plan? Takes 5 min."
+            )
+            return {
+                "body": body, "cta": "open_ended", "send_as": send_as,
+                "suppression_key": suppression_key,
+                "rationale": f"Planning response for merchant intent topic: '{intent_topic}'.",
+                "lever_used": "effort_externalization",
+                "facts_used": [intent_topic, biz_name, locality, "5 min"]
+            }
+
     elif trigger_kind in ("perf_dip", "seasonal_perf_dip"):
-        body = (
-            f"{salutation}, your Google profile views dipped {views_pct}% this week — but this is "
-            f"the normal seasonal acquisition lull across {city} {cat_slug} (-25% to -35% peer average). "
-            f"Action: save ad spend now, and focus retention on your active member base. "
-            f"Want me to draft a member-retention challenge to keep engagement high? Takes 5 min."
-        )
+        # Extract actual performance data from trigger payload
+        metric = t_payload.get("metric", "views")
+        delta_pct_raw = t_payload.get("delta_pct", 0)
+        delta_display = int(abs(delta_pct_raw) * 100) if delta_pct_raw else views_pct
+        window = t_payload.get("window", "7d")
+        is_seasonal = t_payload.get("is_expected_seasonal", False)
+        season_note = t_payload.get("season_note", "").replace("_", " ")
+        vs_baseline = t_payload.get("vs_baseline", "")
+
+        body = f"{salutation}, your Google profile {metric} dipped {delta_display}% this week"
+        if vs_baseline:
+            body += f" (from baseline of {vs_baseline})"
+        if is_seasonal:
+            body += (
+                f" — but this is the normal seasonal acquisition lull across {city} {cat_slug} "
+                f"(-25% to -35% peer average"
+            )
+            if season_note:
+                body += f", {season_note}"
+            body += "). "
+            body += "Action: save ad spend now, and focus retention on your active member base. "
+        else:
+            body += (
+                f". This is steeper than {city} {cat_slug} peers. "
+                f"Worth reviewing your profile freshness and offer visibility. "
+            )
+        body += "Want me to draft a member-retention challenge to keep engagement high? Takes 5 min."
+
+        facts_used = [f"-{delta_display}% {metric}", city, "5 min"]
+        if is_seasonal:
+            facts_used.append("-25% to -35% peer average")
+        if vs_baseline:
+            facts_used.append(f"baseline {vs_baseline}")
+
         return {
             "body": body, "cta": "binary_yes_no", "send_as": send_as,
-            "suppression_key": suppression_key, "rationale": "Pre-empts anxiety with peer data reframe and concrete retention next step.",
-            "lever_used": "social_proof", "facts_used": [f"-{views_pct}% views", "-25% to -35% peer average", city, "5 min"]
+            "suppression_key": suppression_key,
+            "rationale": f"Performance dip notification using actual metric ({metric}, {delta_display}%) from trigger payload, with peer comparison context.",
+            "lever_used": "social_proof",
+            "facts_used": facts_used
         }
+
     elif trigger_kind in ("perf_spike", "milestone_reached"):
-        body = (
-            f"Great news {salutation}! {biz_name} saw {views} views this month (+{views_pct}% week-over-week). "
-            f"Your listing CTR is at {ctr:.1%}. Let's convert this surge with your active offer "
-            f"'{active_offer or 'Featured Special'}'. Want me to schedule a Google post for today? Takes 2 min."
-        )
+        # Extract actual performance/milestone data from trigger payload
+        metric = t_payload.get("metric", "views")
+        delta_pct_raw = t_payload.get("delta_pct", 0)
+        delta_display = int(abs(delta_pct_raw) * 100) if delta_pct_raw else views_pct
+        value_now = t_payload.get("value_now", views)
+        milestone_value = t_payload.get("milestone_value", "")
+        is_imminent = t_payload.get("is_imminent", False)
+        likely_driver = t_payload.get("likely_driver", "").replace("_", " ")
+
+        if trigger_kind == "milestone_reached" and milestone_value:
+            body = (
+                f"Great news {salutation}! {biz_name} is at {value_now} {metric.replace('_', ' ')} "
+                f"— just {milestone_value - value_now if isinstance(milestone_value, int) and isinstance(value_now, int) else 'a few'} away from the {milestone_value} milestone! "
+            )
+            if likely_driver:
+                body += f"Your {likely_driver} content is driving this momentum. "
+            body += (
+                f"Let's push past {milestone_value} with a Google post celebrating it. "
+                f"Want me to draft one? Takes 2 min."
+            )
+            facts_used = [f"{value_now} {metric}", f"{milestone_value} milestone", biz_name, "2 min"]
+            if likely_driver:
+                facts_used.append(likely_driver)
+        else:
+            body = (
+                f"Great news {salutation}! {biz_name} saw {views} views this month "
+                f"(+{delta_display}% week-over-week). Your listing CTR is at {ctr:.1%}. "
+            )
+            if likely_driver:
+                body += f"Your {likely_driver} content appears to be driving this. "
+            body += (
+                f"Let's convert this surge with your active offer "
+                f"'{active_offer or 'Featured Special'}'. "
+                f"Want me to schedule a Google post for today? Takes 2 min."
+            )
+            facts_used = [f"{views} views", f"+{delta_display}%", f"{ctr:.1%} CTR"]
+            if likely_driver:
+                facts_used.append(likely_driver)
+
         return {
             "body": body, "cta": "binary_yes_no", "send_as": send_as,
-            "suppression_key": suppression_key, "rationale": "Celebrates merchant performance milestone with concrete immediate conversion hook.",
-            "lever_used": "effort_externalization", "facts_used": [f"{views} views", f"+{views_pct}%", f"{ctr:.1%} CTR"]
+            "suppression_key": suppression_key,
+            "rationale": f"Performance celebration using actual {metric} data from trigger payload.",
+            "lever_used": "effort_externalization",
+            "facts_used": facts_used
         }
+
     elif trigger_kind == "curious_ask_due":
         body = (
             f"Hi {salutation}! Quick check — what service has been most asked-for this week "
@@ -1000,29 +1362,281 @@ def compose_fallback(category: Dict[str, Any], merchant: Dict[str, Any], trigger
             "suppression_key": suppression_key, "rationale": "High-compulsion curious ask offering immediate reciprocity and 5-min effort cap.",
             "lever_used": "curiosity", "facts_used": [biz_name, "Google post + 4-line WhatsApp reply", "5 min"]
         }
-    elif trigger_kind in ("supply_alert", "regulation_change") and cat_slug == "pharmacies":
-        body = (
-            f"{salutation}, urgent: voluntary recall on 2 atorvastatin batches (AT2024-1102, AT2024-1108) "
-            f"by manufacturer due to sub-potency (no safety risk). Checked your repeat records: "
-            f"22 customers were dispensed these batches in the last 90 days. "
-            f"Want me to draft their WhatsApp note + the replacement pickup workflow? Ready in 5 min."
+
+    elif trigger_kind == "review_theme_emerged":
+        # Extract review theme data from trigger payload
+        theme = t_payload.get("theme", "").replace("_", " ")
+        occurrences = t_payload.get("occurrences_30d", 0)
+        trend = t_payload.get("trend", "")
+        common_quote = t_payload.get("common_quote", "")
+
+        body = f"{salutation}, a pattern is emerging in your recent reviews: "
+        if theme:
+            body += f"'{theme}' "
+        if occurrences:
+            body += f"mentioned {occurrences} times in 30 days"
+        if trend:
+            body += f" (trend: {trend})"
+        body += ". "
+        if common_quote:
+            body += f"One customer wrote: \"{common_quote}\". "
+        body += (
+            f"Want me to draft a reply template + a proactive fix-announcement post? "
+            f"Addressing this publicly builds trust. Takes 5 min."
         )
+
+        facts_used = [biz_name]
+        if theme:
+            facts_used.append(theme)
+        if occurrences:
+            facts_used.append(f"{occurrences} mentions in 30d")
+        if common_quote:
+            facts_used.append(common_quote)
+
         return {
             "body": body, "cta": "binary_yes_no", "send_as": send_as,
-            "suppression_key": suppression_key, "rationale": "Precise compliance notification with exact batch numbers and customer impact count.",
-            "lever_used": "loss_aversion", "facts_used": ["AT2024-1102, AT2024-1108", "22 customers", "last 90 days", "5 min"]
+            "suppression_key": suppression_key,
+            "rationale": f"Review theme alert using actual theme ('{theme}'), occurrence count, and customer quote from trigger payload.",
+            "lever_used": "loss_aversion",
+            "facts_used": facts_used
         }
+
+    elif trigger_kind == "winback_eligible":
+        days_expired = t_payload.get("days_since_expiry", 0)
+        perf_dip = t_payload.get("perf_dip_pct", 0)
+        lapsed_added = t_payload.get("lapsed_customers_added_since_expiry", 0)
+        dip_display = int(abs(perf_dip) * 100) if perf_dip else 0
+
+        body = (
+            f"Hi {salutation}! It's been {days_expired} days since {biz_name}'s subscription expired. "
+        )
+        if dip_display:
+            body += f"Since then, profile performance has dipped {dip_display}%. "
+        if lapsed_added:
+            body += f"{lapsed_added} customers who visited have gone without follow-up. "
+        body += (
+            f"Re-activating today means we can start recovering those leads immediately. "
+            f"Want me to walk you through a quick reactivation? Reply YES."
+        )
+
+        facts_used = [f"{days_expired} days", biz_name]
+        if dip_display:
+            facts_used.append(f"-{dip_display}% performance")
+        if lapsed_added:
+            facts_used.append(f"{lapsed_added} unfollowed customers")
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"Winback using actual days since expiry ({days_expired}) and lapsed customer count from trigger payload.",
+            "lever_used": "loss_aversion",
+            "facts_used": facts_used
+        }
+
+    elif trigger_kind == "renewal_due":
+        days_remaining = t_payload.get("days_remaining", 0)
+        plan = t_payload.get("plan", "Pro")
+        renewal_amount = t_payload.get("renewal_amount", 0)
+
+        body = (
+            f"{salutation}, your {plan} subscription for {biz_name} renews in {days_remaining} days. "
+        )
+        if renewal_amount:
+            body += f"Renewal amount: ₹{renewal_amount:,}. "
+        body += (
+            f"Your current profile has {views} views and {calls} calls this month. "
+            f"Keeping your plan active ensures uninterrupted visibility in {locality}. "
+            f"Want me to process the renewal? Reply YES."
+        )
+
+        facts_used = [f"{days_remaining} days", plan, biz_name, f"{views} views", f"{calls} calls"]
+        if renewal_amount:
+            facts_used.append(f"₹{renewal_amount:,}")
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"Renewal reminder using actual days remaining ({days_remaining}), plan name, and renewal amount from trigger payload.",
+            "lever_used": "loss_aversion",
+            "facts_used": facts_used
+        }
+
+    elif trigger_kind == "gbp_unverified":
+        estimated_uplift = t_payload.get("estimated_uplift_pct", 0)
+        verification_path = t_payload.get("verification_path", "postcard or phone call").replace("_", " ")
+        uplift_display = int(estimated_uplift * 100) if estimated_uplift else 30
+
+        body = (
+            f"Hi {salutation}! {biz_name}'s Google Business Profile is currently unverified. "
+            f"Verified profiles in {locality} see up to +{uplift_display}% more customer engagement. "
+            f"Verification is simple — {verification_path}. "
+            f"Want me to walk you through the 5-minute verification process? Reply YES."
+        )
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"GBP verification nudge using estimated uplift (+{uplift_display}%) and path from trigger payload.",
+            "lever_used": "loss_aversion",
+            "facts_used": [biz_name, locality, f"+{uplift_display}% engagement", verification_path, "5 min"]
+        }
+
+    elif trigger_kind == "cde_opportunity":
+        credits = t_payload.get("credits", 0)
+        fee = t_payload.get("fee", "").replace("_", " ")
+        digest_id = t_payload.get("digest_item_id", "")
+        cde_item = digest_items.get(digest_id, {})
+        cde_title = cde_item.get("title", "upcoming CDE event")
+        cde_source = cde_item.get("source", "")
+        cde_date = cde_item.get("date", "")
+        cde_summary = cde_item.get("summary", "")
+
+        cde_date_display = ""
+        if cde_date:
+            try:
+                dt = datetime.fromisoformat(cde_date)
+                cde_date_display = dt.strftime("%-d %b at %-I:%M%p")
+            except Exception:
+                cde_date_display = cde_date[:10]
+
+        body = f"Dr. {owner_name}, "
+        if cde_title:
+            body += f"'{cde_title}' — "
+        if cde_date_display:
+            body += f"{cde_date_display}. "
+        if credits:
+            body += f"{credits} CDE credits. "
+        if fee:
+            body += f"{fee.capitalize()}. "
+        if cde_summary:
+            body += f"{cde_summary[:100]}. "
+        body += "Want me to register and block your calendar? Reply YES."
+
+        facts_used = [owner_name]
+        if cde_title:
+            facts_used.append(cde_title)
+        if cde_date_display:
+            facts_used.append(cde_date_display)
+        if credits:
+            facts_used.append(f"{credits} CDE credits")
+        if fee:
+            facts_used.append(fee)
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"CDE opportunity with credits and registration offer from digest ({cde_source}).",
+            "lever_used": "effort_externalization",
+            "facts_used": facts_used
+        }
+
+    elif trigger_kind == "competitor_opened":
+        comp_name = t_payload.get("competitor_name", "a new competitor")
+        distance = t_payload.get("distance_km", 0)
+        their_offer = t_payload.get("their_offer", "")
+        opened_date = t_payload.get("opened_date", "")
+
+        body = f"Dr. {owner_name}, heads up: {comp_name} opened "
+        if distance:
+            body += f"{distance} km from your clinic "
+        if opened_date:
+            try:
+                dt = datetime.strptime(opened_date, "%Y-%m-%d")
+                body += f"on {dt.strftime('%-d %b')}. "
+            except Exception:
+                body += f"recently. "
+        else:
+            body += f"in {locality}. "
+        if their_offer:
+            body += f"They're running '{their_offer}'. "
+        body += (
+            f"Your current offer '{active_offer or 'Dental Cleaning @ ₹299'}' still has edge on trust and your {views} profile views. "
+            f"Want me to refresh your GBP description to highlight your differentiators? Takes 3 min."
+        )
+
+        facts_used = [comp_name, locality, active_offer or "Dental Cleaning @ ₹299", f"{views} views"]
+        if distance:
+            facts_used.append(f"{distance} km")
+        if their_offer:
+            facts_used.append(their_offer)
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"Competitor alert using actual competitor name, distance, and their offer from trigger payload.",
+            "lever_used": "loss_aversion",
+            "facts_used": facts_used
+        }
+
+    elif trigger_kind == "category_seasonal":
+        season = t_payload.get("season", "").replace("_", " ")
+        trends = t_payload.get("trends", [])
+        shelf_action = t_payload.get("shelf_action_recommended", False)
+
+        trend_lines = []
+        for t in trends[:3]:
+            if isinstance(t, str):
+                parts = t.replace("_demand_", " demand ").split("_")
+                trend_lines.append(t.replace("_", " "))
+
+        body = f"{salutation}, {season} trends for {cat_slug} in {city}: "
+        if trend_lines:
+            body += "; ".join(trend_lines) + ". "
+        if shelf_action:
+            body += "Shelf action recommended — adjust your front-of-store accordingly. "
+        body += "Want me to draft a seasonal WhatsApp promo for your top-trending items? Takes 5 min."
+
+        facts_used = [season, city] + trend_lines[:3]
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"Seasonal trend notification using actual demand shift data from trigger payload.",
+            "lever_used": "effort_externalization",
+            "facts_used": facts_used
+        }
+
+    elif trigger_kind == "dormant_with_vera":
+        days_dormant = t_payload.get("days_since_last_merchant_message", 0)
+        last_topic = t_payload.get("last_topic", "").replace("_", " ")
+
+        body = f"Hi {salutation}! It's been {days_dormant} days since we last chatted"
+        if last_topic:
+            body += f" (about {last_topic})"
+        body += f". {biz_name} in {locality} has been getting {views} views this month. "
+        body += "Want me to check on your profile health and suggest any quick wins? Takes 2 min."
+
+        facts_used = [f"{days_dormant} days", biz_name, locality, f"{views} views"]
+        if last_topic:
+            facts_used.append(last_topic)
+
+        return {
+            "body": body, "cta": "binary_yes_no", "send_as": send_as,
+            "suppression_key": suppression_key,
+            "rationale": f"Re-engagement message using actual dormancy period ({days_dormant} days) and last topic from trigger payload.",
+            "lever_used": "curiosity",
+            "facts_used": facts_used
+        }
+
     else:
+        # Generic fallback — still uses verified merchant data
         offer_text = active_offer or "Special Package"
         body = (
             f"Hi {salutation}! Quick update for {biz_name} in {locality}: your profile is trending with "
-            f"{views} views. Pushing your active offer '{offer_text}' this week will help drive direct calls. "
+            f"{views} views and {calls} calls this month. "
+        )
+        if ctr:
+            body += f"Your listing CTR is {ctr:.1%}. "
+        body += (
+            f"Pushing your active offer '{offer_text}' this week will help drive direct leads. "
             f"Want me to set up the Google post and WhatsApp flyer today? Live in 3 min."
         )
         return {
             "body": body, "cta": "binary_yes_no", "send_as": send_as,
-            "suppression_key": suppression_key, "rationale": "General category-matched trigger response with specific verified views and offer.",
-            "lever_used": "effort_externalization", "facts_used": [f"{views} views", locality, offer_text, "3 min"]
+            "suppression_key": suppression_key,
+            "rationale": "General trigger response with verified merchant views, calls, CTR, and active offer.",
+            "lever_used": "effort_externalization",
+            "facts_used": [f"{views} views", f"{calls} calls", f"{ctr:.1%} CTR", locality, offer_text, "3 min"]
         }
 
 
